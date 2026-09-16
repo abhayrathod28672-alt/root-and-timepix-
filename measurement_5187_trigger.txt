@@ -1,0 +1,11 @@
+# Software: TrackLab 1.6.0
+# Start of measurement: 24/8/2026 1:54:31.394 UTC
+# Start of measurement - unix time: 1787536471.394
+# Chip ID: K8-W0036
+# Readout IP address: 192.168.1.49
+# Event code 1: evttrgcorbofall
+# Event code 2: evttrg
+# Event code 4: evttrgcorbolead
+# Event code 8: 
+# Event code 16: 
+# -----------------------------------------------------------------------------------------------------------------------------
