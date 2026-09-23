@@ -1,0 +1,760 @@
+
+
+TimePix - TDAQ - CORBO Matching Guide
+
+This notebook explains the analysis chain we built for matching TimePix
+data to TDAQ runs and then comparing TimePix particles/clusters to CORBO
+trigger timestamps.
+
+The main example is the no-target/background run from the logbook:
+
+-   TDAQ run: 1787081424
+-   TimePix files: dataTimePix/measurement_9.txt through
+    dataTimePix/measurement_23.txt
+-   TimePix trigger files: dataTimePix/measurement_9_trigger.txt through
+    dataTimePix/measurement_23_trigger.txt
+-   GPIO setup from the logbook: only GPIO2, recording CORBO falling
+    edge
+-   CORBO meaning here: evttrg & notbusy
+
+The goal is not only to ask whether the file times overlap, but also
+whether the number and time structure of TimePix particles makes sense
+compared with CORBO accepts.
+
+1. What Data We Have
+
+There are two independent systems:
+
+TimePix / TrackLab computer
+
+This produces text files such as:
+
+    dataTimePix/measurement_9.txt
+    dataTimePix/measurement_9_trigger.txt
+
+The main measurement file contains pixel hits. Its header contains the
+absolute start time:
+
+    # Start of measurement - unix time: 1787081420.159
+
+After the header, each hit line has four columns:
+
+    pix    toa    ftoa    tot
+
+The trigger companion file contains GPIO/event timestamps relative to
+the TimePix measurement start:
+
+    event_code    time_seconds
+
+For the no-target file, the logbook says GPIO2 recorded CORBO falling
+edge. The trigger file labels this as event code 1.
+
+TDAQ computer
+
+This produces ROOT files such as:
+
+    1787081424.root
+
+The filename is the TDAQ run number. In this data-taking setup, that run
+number is also the Unix start time of the run. For example:
+
+    1787081424 -> 2026-08-18 19:30:24 UTC
+
+The ROOT file contains RAWdata, with branches like:
+
+    Scaler0_ch15
+    TDC0_ch...
+    QDC0_ch...
+
+We use Scaler0_ch15 as a 1 MHz clock to infer the run end time.
+
+    from pathlib import Path
+    import csv
+    import datetime as dt
+    import subprocess
+    import math
+
+    DATA_DIR = Path('dataTimePix')
+    NO_TARGET_RUN = 1787081424
+    NO_TARGET_MEASUREMENTS = list(range(9, 24))
+
+    print('Workspace files exist:')
+    for path in [
+        Path(f'{NO_TARGET_RUN}.root'),
+        DATA_DIR / 'measurement_9.txt',
+        DATA_DIR / 'measurement_9_trigger.txt',
+        Path('scripts/match_timepix_tdaq.py'),
+        Path('scripts/analyze_timepix_corbo_match.py'),
+    ]:
+        print(f'{path}:', path.exists())
+
+2. The txt2root Convention
+
+The attached txt2root-1.C macro converts one TimePix text file to a ROOT
+tree. The important convention is this:
+
+    x = pix % 256;
+    y = pix / 256;
+    time_ns = toa * 25.0 - ftoa * 1.5625;
+
+Meaning:
+
+-   pix is an encoded pixel index.
+-   x is the pixel column.
+-   y is the pixel row.
+-   toa is a coarse Time-of-Arrival counter in 25 ns ticks.
+-   ftoa is the fine correction in 1.5625 ns ticks.
+-   tot is Time-over-Threshold, useful as a charge-like weight.
+
+The conversion to hit time is therefore:
+
+    time_ns = 25 ns * toa - 1.5625 ns * ftoa
+
+The hit time is relative to the TimePix measurement. To get an absolute
+Unix timestamp for a hit:
+
+    hit_unix_time = measurement_start_unix + time_ns / 1e9
+
+The trigger file already uses relative seconds after the same TimePix
+measurement start, so within one TimePix file we can directly compare:
+
+    cluster_time_seconds   vs   GPIO/CORBO_trigger_time_seconds
+
+    # Inspect the first few lines of the TimePix hit and trigger files.
+    for path in [DATA_DIR / 'measurement_9.txt', DATA_DIR / 'measurement_9_trigger.txt']:
+        print('\n---', path, '---')
+        with path.open(errors='replace') as handle:
+            for i, line in zip(range(18), handle):
+                print(line.rstrip())
+
+3. TimePix Trigger Event Codes and GPIO
+
+For the no-target run, the trigger file header says:
+
+    # Event code 1: trg
+
+The logbook says that for this no-target TimePix run:
+
+    only GPIO2 was connected, recording CORBO on the falling edge
+
+So in the analysis script we use:
+
+    event_code = 1
+
+as the CORBO/GPIO2 timestamp stream.
+
+Important electronics detail:
+
+-   CORBO falling edge should occur 120 ns after the rising edge if the
+    pulse width is 120 ns.
+-   That is only 0.120 us.
+-   This is much smaller than the few-hundred-microsecond busy/readout
+    window.
+-   We should remember it for precise edge comparison, but it does not
+    explain any broad 100 us scale ambiguity by itself.
+
+4. TDAQ Run Timing from ROOT Files
+
+For each numeric ROOT file, the script scripts/match_timepix_tdaq.py
+does this:
+
+1.  Reads the run number from the filename, for example 1787081424.root.
+2.  Treats this run number as the Unix start time.
+3.  Opens the RAWdata tree.
+4.  Finds Scaler0_ch15 automatically.
+5.  Reads the scaler values event-by-event.
+6.  Counts 32-bit counter wraps.
+7.  Converts the final 1 MHz count to elapsed seconds.
+8.  Computes:
+
+    tdaq_end_unix = tdaq_start_unix + elapsed_microseconds / 1e6
+
+The scaler can overflow because it is a 32-bit counter:
+
+    2^32 microseconds = 4294.967296 seconds = about 71.58 minutes
+
+So for long runs, the script counts how many times Scaler0_ch15 rolls
+over.
+
+    # Regenerate the TDAQ-TimePix matching tables.
+    # This can take a little while because it opens all numeric ROOT files.
+    subprocess.run([
+        'python3', 'scripts/match_timepix_tdaq.py',
+        '--output', 'timepix_tdaq_matches.csv',
+        '--tdaq-summary', 'tdaq_run_times.csv',
+    ], check=True)
+
+    # Show the TDAQ timing for the no-target run.
+    with open('tdaq_run_times.csv', newline='') as handle:
+        rows = list(csv.DictReader(handle))
+
+    for row in rows:
+        if row['run_number'] == str(NO_TARGET_RUN):
+            for key in [
+                'run_number', 'start_utc', 'end_utc', 'elapsed_seconds',
+                'entries', 'scaler_branch', 'wraps', 'first_count', 'last_count', 'status'
+            ]:
+                print(f'{key}: {row[key]}')
+            break
+
+5. Matching TimePix Measurement Files to TDAQ Runs
+
+A TimePix measurement has its own start time and usually a trigger file
+with relative timestamps. The matching script estimates the TimePix
+measurement interval as:
+
+    TimePix start = header Unix time
+    TimePix end   = header Unix time + last trigger timestamp
+
+A TDAQ run interval is:
+
+    TDAQ start = run number Unix time
+    TDAQ end   = TDAQ start + scaler-derived elapsed time
+
+Then the script matches by time overlap. This matters because:
+
+-   TimePix can start before TDAQ.
+-   TimePix can finish before TDAQ.
+-   A TimePix file can sit near a TDAQ run boundary.
+-   The systems are independent, so start/stop times are not exactly
+    simultaneous.
+
+The script also uses a small near_tdaq_start tolerance so that a TimePix
+file beginning a few seconds before a TDAQ run is assigned to that new
+run if appropriate.
+
+    # Summarize which TimePix measurement files currently match which TDAQ run.
+    from collections import defaultdict, Counter
+
+    with open('timepix_tdaq_matches.csv', newline='') as handle:
+        match_rows = list(csv.DictReader(handle))
+
+    by_run = defaultdict(list)
+    for row in match_rows:
+        by_run[row['tdaq_run_number']].append(row)
+
+    print('TDAQ run -> TimePix measurement range')
+    for run in sorted(by_run, key=lambda value: int(value) if value else -1):
+        rows = by_run[run]
+        ids = [int(r['timepix_measurement_id']) for r in rows if r['timepix_measurement_id'].isdigit()]
+        methods = Counter(r['match_method'] for r in rows)
+        print(
+            f'{run}: measurement_{min(ids)}..measurement_{max(ids)} '
+            f'({len(rows)} files), methods={dict(methods)}'
+        )
+
+6. The No-Target Run We Use as Reference
+
+The clean reference sample is:
+
+    TDAQ run: 1787081424
+    Target: NO
+    TimePix: measurement_9..measurement_23
+    GPIO: only GPIO2
+    GPIO2 signal: CORBO falling edge
+
+This is useful because it is a background/no-target sample. It lets us
+test whether TimePix and CORBO are seeing the same beam structure before
+adding target interactions.
+
+The logbook note said the TimePix trigger count was about 40095.
+Counting the trigger file entries gives about 39930, close enough that
+we are clearly looking at the intended data block.
+
+    # Count GPIO/CORBO trigger timestamps in measurement_9..23.
+    def count_trigger_lines(path, event_code=1):
+        count = 0
+        with path.open(errors='replace') as handle:
+            for line in handle:
+                if not line.strip() or line.startswith('#'):
+                    continue
+                fields = line.split()
+                if len(fields) >= 2 and int(fields[0]) == event_code:
+                    count += 1
+        return count
+
+    trigger_counts = []
+    for measurement_id in NO_TARGET_MEASUREMENTS:
+        path = DATA_DIR / f'measurement_{measurement_id}_trigger.txt'
+        trigger_counts.append((measurement_id, count_trigger_lines(path)))
+
+    print('Per-file trigger counts:')
+    for measurement_id, count in trigger_counts:
+        print(f'measurement_{measurement_id}: {count}')
+    print('Total:', sum(count for _, count in trigger_counts))
+
+7. Why Clustering Is Needed
+
+A charged particle crossing TimePix usually does not produce exactly one
+pixel hit. It can produce a small group of adjacent pixels close
+together in time.
+
+If we counted raw hits, we would overcount particles. Therefore we
+cluster hits first.
+
+The basic clustering idea follows the TrackLab description:
+
+1.  Read all TimePix hits.
+2.  Sort them by hit time, because the file may not be perfectly time
+    ordered.
+3.  For each hit, check nearby active hits.
+4.  Merge hits if they are adjacent in pixel space and close in time.
+5.  After clustering, count clusters instead of raw hits.
+
+The first simple version here uses:
+
+    geometric adjacency: |dx| <= 1 and |dy| <= 1
+    time adjacency:      hit times within 200 ns
+    minimum cluster size: 3 pixels
+    cluster time:        earliest hit in the cluster
+
+The earliest hit is the natural first choice when comparing to a trigger
+edge.
+
+8. Clustering and CORBO Matching Script
+
+The script scripts/analyze_timepix_corbo_match.py performs the no-target
+analysis.
+
+It can vary:
+
+-   measurement range, default 9..23
+-   event code, default 1
+-   cluster time window, default 200 ns
+-   minimum pixels per cluster
+-   cluster time reference: earliest, weighted, or latest
+-   matching windows, for example 10 us, 100 us, 500 us
+-   busy/dead-time windows, for example 200 us
+-   time-binned rate-correlation bins, for example 10 ms, 100 ms
+
+The outputs are:
+
+    timepix_no_target_clusters.csv
+
+one row per cluster, and:
+
+    timepix_no_target_corbo_summary.csv
+
+one row per measurement file plus a TOTAL row.
+
+    # Run the no-target clustering and CORBO comparison.
+    subprocess.run([
+        'python3', 'scripts/analyze_timepix_corbo_match.py',
+        '--measurements', '9..23',
+        '--cluster-time-window-ns', '200',
+        '--min-pixels', '3',
+        '--cluster-time-reference', 'earliest',
+        '--offset-search-window-us', '2000',
+        '--offset-bin-us', '5',
+        '--correlation-bin-ms', '10,50,100,500',
+        '--correlation-max-lag-ms', '1000',
+        '--busy-window-us', '50,100,200,300,500',
+        '--output-clusters', 'timepix_no_target_clusters.csv',
+        '--output-summary', 'timepix_no_target_corbo_summary.csv',
+        '--output-offsets', 'timepix_no_target_offset_scan.csv',
+    ], check=True)
+
+    # Print the TOTAL row from the no-target summary.
+    with open('timepix_no_target_corbo_summary.csv', newline='') as handle:
+        summary_rows = list(csv.DictReader(handle))
+
+    total = next(row for row in summary_rows if row['measurement_id'] == 'TOTAL')
+
+    important_keys = [
+        'hits',
+        'clusters',
+        'trigger_count',
+        'cluster_to_trigger_ratio',
+        'triggers_with_cluster_within_10us',
+        'triggers_with_cluster_within_100us',
+        'triggers_with_cluster_within_500us',
+        'corr_10ms_best_lag_ms',
+        'corr_10ms_pearson',
+        'corr_100ms_best_lag_ms',
+        'corr_100ms_pearson',
+        'busy_200us_corbos_with_cluster',
+        'busy_200us_clusters_in_windows',
+    ]
+
+    for key in important_keys:
+        print(f'{key}: {total.get(key, "")}')
+
+9. Three Different Matching Questions
+
+It is important to separate three different questions.
+
+Question A: Do the data files overlap in absolute time?
+
+This is the TDAQ/TimePix file matching question. The answer is yes for
+the recent files. For the no-target run, measurement_9..23 match
+1787081424.
+
+Question B: Can every CORBO timestamp be matched to one exact TimePix particle?
+
+This is harder. A one-to-one event match means:
+
+    CORBO timestamp i  <->  TimePix cluster j
+
+At high rate this can be ambiguous because several clusters can occur
+near the same trigger, and several triggers can occur close together.
+The nearest cluster is not always guaranteed to be the correct particle.
+
+Question C: Do CORBO and TimePix see the same time structure?
+
+This is the more robust first check. We bin time into windows like
+10 ms, 50 ms, or 100 ms and compare counts:
+
+    number of CORBO timestamps in each bin
+    vs
+    number of TimePix clusters in each bin
+
+For the no-target run, this correlation is strong. That means TimePix
+and CORBO follow the same beam/spill intensity structure, even if exact
+particle-by-particle matching remains ambiguous.
+
+10. Fixed Offset Scan
+
+If the only difference between TimePix clusters and CORBO timestamps
+were a cable/electronics delay, we would expect:
+
+    TimePix_cluster_time = CORBO_time + constant_offset
+
+The script scans cluster_time - CORBO_time in a window around each CORBO
+timestamp.
+
+For this no-target sample, the broad scan did not reveal a meaningful
+nonzero offset. The peak is near 0 us, and shifting by that does not
+significantly improve event-by-event matching.
+
+This does not mean the 120 ns falling-edge correction is wrong. It only
+means that the current event-level ambiguity is much larger than 120 ns.
+
+Remember:
+
+    120 ns = 0.120 us
+
+That correction is tiny compared with a 200 us busy/readout window.
+
+    # Show the strongest bins from the offset scan.
+    with open('timepix_no_target_offset_scan.csv', newline='') as handle:
+        offset_rows = list(csv.DictReader(handle))
+
+    top = sorted(offset_rows, key=lambda row: int(row['count']), reverse=True)[:12]
+    for row in top:
+        print(f"offset_us={row['offset_us']:>10}  count={row['count']}")
+
+11. Busy / Dead-Time Window Interpretation
+
+This is probably the best physical interpretation for CORBO here.
+
+You pointed out that CORBO is:
+
+    evttrg & notbusy
+
+If the busy signal is about 200 us, then it is not necessary for the
+TimePix cluster to land exactly on the CORBO timestamp. Instead, ask:
+
+    For each CORBO accept, is there at least one TimePix cluster in the next 200 us?
+
+This is what the busy_200us_* columns measure.
+
+For the current no-target sample, the result was approximately:
+
+    CORBO timestamps: 39930
+    TimePix clusters: 45359
+    CORBO windows with at least one cluster in 200 us: about 19116
+    clusters inside 200 us CORBO windows: about 27929
+
+So roughly half of CORBO accepts have a visible TimePix cluster within a
+200 us post-CORBO window, and a large fraction of TimePix clusters fall
+inside those windows.
+
+That is plausible because TimePix covers only part of the beam and has
+its own threshold/efficiency/geometry.
+
+11a. Background Run Scaler Channel Map
+
+The scaler map supplied for this setup is:
+
+    Scaler0_ch10 = FS0FS1
+    Scaler0_ch11 = EVTTRG
+    Scaler0_ch12 = CORBO
+    Scaler0_ch15 = 1 MHz clock
+
+This is important because the TimePix background run 1787081424 did not
+record EVTTRG in the TimePix trigger file; it recorded only GPIO2/CORBO.
+However, TDAQ did record scaler counts, so we can still compare TimePix
+clusters to the scaler EVTTRG count over the same time window.
+
+For measurement_9..23, the TimePix window overlaps TDAQ from
+approximately:
+
+    0 to 899.960 seconds after TDAQ start
+
+Using the scaler map, the counts in that same window are:
+
+    FS0FS1:        130149
+    EVTTRG:        111198
+    CORBO:          47399
+    TDAQ entries:   47400
+    TimePix clusters: 45359
+
+So the clean comparison is:
+
+    TimePix clusters / EVTTRG = about 0.408
+    TimePix clusters / CORBO  = about 0.957
+    CORBO / EVTTRG            = about 0.426
+
+This makes physical sense: TimePix is independent of TDAQ busy, but it
+covers only part of the beam and has its own threshold/efficiency. It is
+therefore not expected to see every EVTTRG particle. It should be
+compared to EVTTRG for the incoming particle scale, and to CORBO for the
+accepted-TDAQ scale.
+
+    # Background run scaler-map comparison.
+    # Map supplied for this setup:
+    #   Scaler0_ch10 = FS0FS1
+    #   Scaler0_ch11 = EVTTRG
+    #   Scaler0_ch12 = CORBO
+    #   Scaler0_ch15 = 1 MHz clock
+
+    background_counts = {
+        'FS0FS1_scaler_ch10': 130149,
+        'EVTTRG_scaler_ch11': 111198,
+        'CORBO_scaler_ch12': 47399,
+        'TDAQ_entries_in_window': 47400,
+        'TimePix_clusters_min3_200ns': int(total['clusters']),
+    }
+
+    for key, value in background_counts.items():
+        print(f'{key}: {value}')
+
+    print('\nRatios:')
+    print('TimePix clusters / EVTTRG:', background_counts['TimePix_clusters_min3_200ns'] / background_counts['EVTTRG_scaler_ch11'])
+    print('TimePix clusters / CORBO:', background_counts['TimePix_clusters_min3_200ns'] / background_counts['CORBO_scaler_ch12'])
+    print('CORBO / EVTTRG:', background_counts['CORBO_scaler_ch12'] / background_counts['EVTTRG_scaler_ch11'])
+    print('FS0FS1 / EVTTRG:', background_counts['FS0FS1_scaler_ch10'] / background_counts['EVTTRG_scaler_ch11'])
+
+    # Print the busy-window columns from the TOTAL row.
+    for window_us in [50, 100, 200, 300, 500]:
+        base = f'busy_{window_us}us'
+        print(
+            f'{window_us:>3} us: '
+            f"CORBO windows with cluster = {total[f'{base}_corbos_with_cluster']} / {total['trigger_count']}, "
+            f"clusters in windows = {total[f'{base}_clusters_in_windows']}"
+        )
+
+12. Rate Correlation Result
+
+The strongest result so far is the time-binned rate correlation.
+
+For each bin width, the script scans a lag and computes the Pearson
+correlation between:
+
+    TimePix cluster count per bin
+    CORBO timestamp count per bin
+
+The current no-target result is:
+
+    10 ms bins:   best lag 0 ms, correlation about 0.916
+    50 ms bins:   best lag 0 ms, correlation about 0.943
+    100 ms bins:  best lag 0 ms, correlation about 0.948
+    500 ms bins:  best lag 0 ms, correlation about 0.943
+
+This is strong evidence that the two streams are seeing the same beam
+structure.
+
+Practical meaning:
+
+-   TimePix and CORBO are time-aligned at the
+    millisecond/spill-structure level.
+-   There is no obvious per-file clock-scale mistake.
+-   There is no large fixed offset missing.
+-   Single-particle assignment still needs care because of rate,
+    geometry, efficiency, and busy/readout effects.
+
+    # Per-measurement correlations.
+    for row in summary_rows:
+        print(
+            f"measurement_{row['measurement_id']}: " if row['measurement_id'] != 'TOTAL' else 'TOTAL: ',
+            f"clusters={row['clusters']}, triggers={row['trigger_count']}, ",
+            f"corr10ms={row.get('corr_10ms_pearson', '')}, lag10ms={row.get('corr_10ms_best_lag_ms', '')} ms, ",
+            f"corr100ms={row.get('corr_100ms_pearson', '')}, lag100ms={row.get('corr_100ms_best_lag_ms', '')} ms",
+            sep=''
+        )
+
+13. How To Tune the Clustering
+
+The current parameters are a first-pass choice:
+
+    cluster-time-window-ns = 200
+    min-pixels = 3
+    cluster-time-reference = earliest
+
+Things to scan:
+
+Minimum pixels
+
+-   min_pixels = 2 gives many more clusters.
+-   min_pixels = 3 gives a cluster count close to CORBO count.
+-   Larger values select larger particle deposits but may reject real
+    small clusters.
+
+Time window
+
+-   Too small: one particle can split into multiple clusters.
+-   Too large: nearby independent particles can merge.
+
+Cluster time reference
+
+-   earliest: best for leading/falling edge comparison.
+-   weighted: stable central time of the cluster, weighted by ToT.
+-   latest: usually not the first choice for trigger matching.
+
+Example scans:
+
+    python3 scripts/analyze_timepix_corbo_match.py --min-pixels 2 --cluster-time-window-ns 200
+    python3 scripts/analyze_timepix_corbo_match.py --min-pixels 3 --cluster-time-window-ns 100
+    python3 scripts/analyze_timepix_corbo_match.py --min-pixels 4 --cluster-time-window-ns 200
+
+13a. Background Cluster Parameter Scan
+
+Because this is a 3 GeV hadron beam, the cluster definition matters. A
+hadron can create compact clusters, angled tracks, secondaries, or small
+showers. Therefore one arbitrary clustering setting should not be
+trusted without a scan.
+
+Using the scaler map:
+
+    EVTTRG = Scaler0_ch11 = 111198
+    CORBO  = Scaler0_ch12 = 47399
+
+we scanned the background run with several cluster definitions.
+
+The main result is:
+
+-   changing the time adjacency window from 50 ns to 1000 ns barely
+    changes the min_pixels=3 count;
+-   changing minimum cluster size changes the particle count
+    dramatically.
+
+This means the key uncertainty is not the 200 ns time window. The key
+uncertainty is what minimum pixel multiplicity should count as a
+particle.
+
+For time_window_ns = 200:
+
+    min_pixels = 1: 233132 clusters = 2.10 * EVTTRG
+    min_pixels = 2: 145488 clusters = 1.31 * EVTTRG
+    min_pixels = 3:  45359 clusters = 0.41 * EVTTRG = 0.96 * CORBO
+    min_pixels = 4:  28511 clusters = 0.26 * EVTTRG
+
+So if the expectation is that TimePix should be closer to EVTTRG than
+CORBO, min_pixels=2 may be a better first count-level choice than
+min_pixels=3. But min_pixels=2 may include split/noisy small deposits.
+This needs validation with cluster-size distributions and hit maps.
+
+    # Show the background clustering parameter scan.
+    with open('timepix_background_cluster_parameter_scan.csv', newline='') as handle:
+        scan_rows = list(csv.DictReader(handle))
+
+    for row in scan_rows:
+        print(
+            f"time_window={row['time_window_ns']:>4} ns, "
+            f"min_pixels={row['min_pixels']:>2}, "
+            f"clusters={row['clusters']:>6}, "
+            f"clusters/EVTTRG={row['clusters_over_evttrg']}, "
+            f"clusters/CORBO={row['clusters_over_corbo']}, "
+            f"corr100ms={row['corr100ms']}"
+        )
+
+    # Optional quick parameter scan over minimum cluster size.
+    # This reruns the analysis several times and prints only the summary lines.
+    for min_pixels in [2, 3, 4, 5, 8]:
+        print('\n--- min_pixels =', min_pixels, '---')
+        result = subprocess.run([
+            'python3', 'scripts/analyze_timepix_corbo_match.py',
+            '--measurements', '9..23',
+            '--cluster-time-window-ns', '200',
+            '--min-pixels', str(min_pixels),
+            '--cluster-time-reference', 'earliest',
+            '--correlation-bin-ms', '100',
+            '--busy-window-us', '200',
+            '--output-clusters', f'/tmp/timepix_clusters_min{min_pixels}.csv',
+            '--output-summary', f'/tmp/timepix_summary_min{min_pixels}.csv',
+            '--output-offsets', f'/tmp/timepix_offsets_min{min_pixels}.csv',
+        ], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True)
+        for line in result.stdout.splitlines():
+            if (
+                line.startswith('Clusters:') or
+                line.startswith('CORBO trigger') or
+                line.startswith('Cluster/CORBO') or
+                line.startswith('busy_200us') or
+                line.startswith('corr_100ms')
+            ):
+                print(line)
+
+14. Current Bottom Line
+
+For the no-target run:
+
+    TDAQ run 1787081424
+    TimePix measurement_9..23
+    GPIO2 = CORBO falling edge
+
+The current analysis says:
+
+1.  The TimePix and TDAQ files are correctly matched in absolute time.
+2.  The TimePix trigger files contain about the expected number of CORBO
+    timestamps.
+3.  Raw TimePix hits must be clustered before particle counting.
+4.  With min_pixels=3, TimePix cluster count is close to CORBO count:
+
+    45359 clusters vs 39930 CORBO timestamps
+
+1.  A clean one-to-one particle match is not yet established.
+2.  The time-binned rate structure matches very well:
+
+    correlation about 0.92-0.95 for 10-500 ms bins
+
+1.  A 200 us busy-window interpretation is more physical than exact
+    timestamp equality.
+2.  The 120 ns CORBO falling-edge relation is real, but it is much
+    smaller than the current matching ambiguity.
+
+So the data are meaningful and correlated. The next analysis step should
+be to tune clustering and busy-window matching, then apply the same
+approach to target runs and compare target/no-target rates and spatial
+distributions.
+
+15. Useful Commands
+
+Regenerate TDAQ/TimePix file matching:
+
+    python3 scripts/match_timepix_tdaq.py \
+      --output timepix_tdaq_matches.csv \
+      --tdaq-summary tdaq_run_times.csv
+
+Run the no-target CORBO comparison:
+
+    python3 scripts/analyze_timepix_corbo_match.py \
+      --measurements 9..23 \
+      --cluster-time-window-ns 200 \
+      --min-pixels 3 \
+      --cluster-time-reference earliest \
+      --busy-window-us 50,100,200,300,500 \
+      --correlation-bin-ms 10,50,100,500
+
+Run a target block, for example graphite around measurement_756..1172:
+
+    python3 scripts/analyze_timepix_corbo_match.py \
+      --measurements 756..1172 \
+      --cluster-time-window-ns 200 \
+      --min-pixels 3 \
+      --cluster-time-reference earliest
+
+Remember to update the interpretation of GPIOs for target runs:
+
+-   no-target reference 1787081424: GPIO2 = CORBO falling edge
+-   later runs: GPIO1 = EVTTRG explicitly in the logbook; GPIO2 is
+    probably CORBO but should be confirmed
