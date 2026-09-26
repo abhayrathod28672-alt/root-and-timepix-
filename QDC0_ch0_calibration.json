@@ -1,0 +1,34 @@
+{
+  "calibration": {
+    "forced_origin": true,
+    "offset": 0.0,
+    "offset_uncertainty": 0.0,
+    "slope": 0.9487597556012145,
+    "uncertainty": 0.0068158910465145935
+  },
+  "calibration_points": [
+    {
+      "adc": 1021.075295196417,
+      "adc_uncertainty": 108.08249140136287,
+      "energy": 1000.0,
+      "file": "/home/bl4sdaq/TDAQ_CMake/TDAQ_Data/convertedToROOT/1781539375.root"
+    },
+    {
+      "adc": 2095.2994336721845,
+      "adc_uncertainty": 145.0933785594727,
+      "energy": 2000.0,
+      "file": "/home/bl4sdaq/TDAQ_CMake/TDAQ_Data/convertedToROOT/1781538897.root"
+    },
+    {
+      "adc": 3180.969792261858,
+      "adc_uncertainty": 174.6814119655599,
+      "energy": 3000.0,
+      "file": "/home/bl4sdaq/TDAQ_CMake/TDAQ_Data/convertedToROOT/1781538472.root"
+    }
+  ],
+  "channel": "QDC0_0",
+  "pedestal": {
+    "uncertainty": 0.5547112343294858,
+    "value": 125.49279545100508
+  }
+}
