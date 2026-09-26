@@ -1,10 +1,9 @@
 {
   "calibration": {
-    "forced_origin": true,
-    "offset": 0.0,
-    "offset_uncertainty": 0.0,
-    "slope": 0.9646408519615602,
-    "uncertainty": 0.0052823266888095514
+    "offset": 43.40459177978361,
+    "offset_uncertainty": 1.7096141278703152,
+    "slope": 0.9467533195598866,
+    "uncertainty": 0.0007634373091315436
   },
   "calibration_points": [
     {
