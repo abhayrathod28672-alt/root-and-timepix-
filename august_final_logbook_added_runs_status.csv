@@ -1,0 +1,10 @@
+cal,energy_mev,run,root_file_ready,status,note
+Cal0,3000,1786833136,no,added_in_final_logbook,"CAL0 repeated after moving to new Ch16; ROOT file not available in this workspace"
+Cal0,2000,1786834513,no,added_in_final_logbook,"CAL0 repeated after moving to new Ch16; ROOT file not available in this workspace"
+Cal0,1000,x,no,run_number_missing_in_logbook,"Logbook entry appears in CAL0 repeat block but run number is marked x; likely not ready for notebook analysis"
+Cal7,1000,1786836376,no,added_in_final_logbook,"CAL7 final-night calibration; ROOT file not available in this workspace"
+Cal7,2000,1786837396,no,added_in_final_logbook,"CAL7 final-night calibration; ROOT file not available in this workspace"
+Cal7,3000,1786838309,no,added_in_final_logbook,"CAL7 final-night calibration; ROOT file not available in this workspace"
+Cal18,3000,1786839384,no,added_in_final_logbook,"CAL18 final-night calibration; ROOT file not available in this workspace"
+Cal18,2000,x,no,run_number_missing_in_logbook,"Logbook entry exists but run number/events are marked x; ROOT file not available"
+Cal18,1000,,no,not_found_in_final_logbook,"No 1 GeV CAL18 calibration run found in the extracted final logbook text"
